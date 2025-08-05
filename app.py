@@ -33,7 +33,7 @@ app = Flask(__name__)
 CORS(app)
 
 # This is the new function to replace your existing one in app.py
-@app.route('/predict', methods=['POST'])
+@app.route('/predict', methods=['POST'], strict_slashes=False)
 def predict():
     # 1. Get the company name from the request
     data = request.get_json()
