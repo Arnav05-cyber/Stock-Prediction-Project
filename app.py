@@ -3,17 +3,17 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import joblib
 import tensorflow as tf
 from datetime import datetime, timedelta
 import requests
-import time
+from dotenv import load_dotenv
 
-# --- Monkey patch yfinance with session headers ---
-headers = {'User-Agent': 'Mozilla/5.0'}
-session = requests.Session()
-session.headers.update(headers)
+load_dotenv()  # Load API keys from .env if available
+
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+
+LOOK_BACK_PERIOD = 60
 
 print("Loading trained model, scaler, and ticker data...")
 
@@ -27,23 +27,32 @@ except FileNotFoundError:
     print("Warning: Ticker symbol mapping file 'nasdaqtraded_full.csv' not found.")
     tickers_df = None
 
-LOOK_BACK_PERIOD = 60
-
 app = Flask(__name__)
 CORS(app)
 
-# --- Retry logic for yfinance fetch ---
-def safe_yfinance_download(ticker, start, end, session, retries=3, delay=3):
-    for i in range(retries):
-        try:
-            df = yf.download(ticker, start=start, end=end, session=session)
-            if not df.empty:
-                return df
-            print(f"Attempt {i+1}: Empty data for {ticker}")
-        except Exception as e:
-            print(f"Attempt {i+1} failed for {ticker}: {e}")
-        time.sleep(delay)
-    return pd.DataFrame()
+# ✅ Function to fetch historical data from Polygon
+def fetch_polygon_data(ticker, days=90):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.date()}/{end_date.date()}?adjusted=true&sort=asc&limit=120&apiKey={POLYGON_API_KEY}"
+
+    print(f"Fetching from Polygon: {url}")
+    response = requests.get(url)
+    if response.status_code != 200:
+        print(f"Polygon API Error: {response.status_code} - {response.text}")
+        return None
+
+    data = response.json()
+    if "results" not in data or not data["results"]:
+        print("No results in Polygon response.")
+        return None
+
+    df = pd.DataFrame(data["results"])
+    df["t"] = pd.to_datetime(df["t"], unit="ms")
+    df.set_index("t", inplace=True)
+    df.rename(columns={"c": "Close"}, inplace=True)
+    return df
+
 
 @app.route('/predict', methods=['POST'], strict_slashes=False)
 def predict():
@@ -62,44 +71,19 @@ def predict():
         return jsonify({"error": f"Company '{company_name}' not found."}), 404
 
     ticker_symbol = match.iloc[0]['Symbol']
+    print(f"Predicting for: {ticker_symbol}")
 
     try:
-        print(f"--- DEBUG: yfinance version is {yf.__version__} ---")
-        print(f"--- DEBUG: Ticker being fetched: {ticker_symbol} ---")
+        df = fetch_polygon_data(ticker_symbol)
+        if df is None or df.shape[0] < LOOK_BACK_PERIOD:
+            return jsonify({"error": f"Not enough data for {ticker_symbol}."}), 400
 
-        # Connectivity check (optional debug)
-        try:
-            test_resp = requests.get("https://query1.finance.yahoo.com", timeout=5)
-            print("DEBUG: Yahoo Finance Connectivity:", test_resp.status_code)
-        except Exception as ex:
-            print("DEBUG: Failed to reach Yahoo Finance:", ex)
+        recent_prices = df['Close'].values[-LOOK_BACK_PERIOD:].reshape(-1, 1)
+        scaled_data = scaler.transform(recent_prices)
+        X_input = np.reshape(scaled_data, (1, LOOK_BACK_PERIOD, 1))
 
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=LOOK_BACK_PERIOD + 30)
-
-        live_data = safe_yfinance_download(ticker_symbol, start=start_date, end=end_date, session=session)
-        print(f"--- DEBUG: Raw data shape from yfinance on Railway: {live_data.shape} ---")
-
-        live_data.dropna(inplace=True)
-        print(f"--- DEBUG: Shape after dropna(): {live_data.shape} ---")
-
-        # Fallback to local CSV in root folder (e.g., AAPL_data.csv)
-        if live_data.empty:
-            fallback_path = f"{ticker_symbol}_data.csv"
-            if os.path.exists(fallback_path):
-                print(f"Using fallback data from {fallback_path}")
-                live_data = pd.read_csv(fallback_path, index_col=0, parse_dates=True)
-            else:
-                return jsonify({"error": f"Failed to fetch data for {ticker_symbol} and no fallback available."}), 500
-
-        if len(live_data) < LOOK_BACK_PERIOD:
-            return jsonify({"error": f"Not enough historical data for {ticker_symbol} to make a prediction."}), 400
-
-        recent_prices = live_data['Close'].values[-LOOK_BACK_PERIOD:].reshape(-1, 1)
-        scaled_live_data = scaler.transform(recent_prices)
-        X_live = np.reshape(scaled_live_data, (1, LOOK_BACK_PERIOD, 1))
-        predicted_scaled_price = model.predict(X_live)
-        predicted_price = scaler.inverse_transform(predicted_scaled_price)
+        prediction = model.predict(X_input)
+        predicted_price = scaler.inverse_transform(prediction)
 
         return jsonify({
             "company_name": company_name,
@@ -111,6 +95,7 @@ def predict():
         import traceback
         print(traceback.format_exc())
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))

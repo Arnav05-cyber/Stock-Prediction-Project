@@ -1,6 +1,14 @@
-# Virtual Environment
-tf_env/
-
-# Python cache
+# Ignore Python cache files
 __pycache__/
 *.pyc
+
+# Ignore environment config
+.env
+
+# Ignore model and scaler files if you don't want them on GitHub
+*.pkl
+*.h5
+*.keras
+
+# Ignore system files
+.DS_Store
