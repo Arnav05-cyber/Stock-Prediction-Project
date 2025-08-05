@@ -7,7 +7,8 @@ import yfinance as yf
 import joblib
 import tensorflow as tf
 from datetime import datetime, timedelta
-import requests  # <-- added for yfinance monkey patch
+import requests
+import time
 
 # --- Monkey patch yfinance with session headers ---
 headers = {'User-Agent': 'Mozilla/5.0'}
@@ -30,6 +31,19 @@ LOOK_BACK_PERIOD = 60
 
 app = Flask(__name__)
 CORS(app)
+
+# --- Retry logic for yfinance fetch ---
+def safe_yfinance_download(ticker, start, end, session, retries=3, delay=3):
+    for i in range(retries):
+        try:
+            df = yf.download(ticker, start=start, end=end, session=session)
+            if not df.empty:
+                return df
+            print(f"Attempt {i+1}: Empty data for {ticker}")
+        except Exception as e:
+            print(f"Attempt {i+1} failed for {ticker}: {e}")
+        time.sleep(delay)
+    return pd.DataFrame()
 
 @app.route('/predict', methods=['POST'], strict_slashes=False)
 def predict():
@@ -63,11 +77,20 @@ def predict():
         end_date = datetime.now()
         start_date = end_date - timedelta(days=LOOK_BACK_PERIOD + 30)
 
-        live_data = yf.download(ticker_symbol, start=start_date, end=end_date, session=session)
+        live_data = safe_yfinance_download(ticker_symbol, start=start_date, end=end_date, session=session)
         print(f"--- DEBUG: Raw data shape from yfinance on Railway: {live_data.shape} ---")
 
         live_data.dropna(inplace=True)
         print(f"--- DEBUG: Shape after dropna(): {live_data.shape} ---")
+
+        # Fallback to local CSV in root folder (e.g., AAPL_data.csv)
+        if live_data.empty:
+            fallback_path = f"{ticker_symbol}_data.csv"
+            if os.path.exists(fallback_path):
+                print(f"Using fallback data from {fallback_path}")
+                live_data = pd.read_csv(fallback_path, index_col=0, parse_dates=True)
+            else:
+                return jsonify({"error": f"Failed to fetch data for {ticker_symbol} and no fallback available."}), 500
 
         if len(live_data) < LOOK_BACK_PERIOD:
             return jsonify({"error": f"Not enough historical data for {ticker_symbol} to make a prediction."}), 400
