@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 load_dotenv()  # Load API keys from .env if available
 
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
-
 LOOK_BACK_PERIOD = 60
 
 print("Loading trained model, scaler, and ticker data...")
@@ -30,7 +29,7 @@ except FileNotFoundError:
 app = Flask(__name__)
 CORS(app)
 
-# ✅ Function to fetch historical data from Polygon
+# ✅ Function to fetch historical stock data from Polygon
 def fetch_polygon_data(ticker, days=90):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
@@ -53,7 +52,19 @@ def fetch_polygon_data(ticker, days=90):
     df.rename(columns={"c": "Close"}, inplace=True)
     return df
 
+# ✅ Function to extract ticker from company name
+def get_ticker_for_company(company_name):
+    if tickers_df is None:
+        return None
 
+    company_name = company_name.lower().strip()
+    matches = tickers_df[tickers_df['Security Name'].str.lower().str.contains(company_name)]
+
+    if not matches.empty:
+        return matches.iloc[0]['Symbol']
+    return None
+
+# ✅ Main prediction route
 @app.route('/predict', methods=['POST'], strict_slashes=False)
 def predict():
     data = request.get_json()
@@ -61,16 +72,11 @@ def predict():
         return jsonify({"error": "Missing 'company_name' in request body"}), 400
 
     company_name = data['company_name']
+    ticker_symbol = get_ticker_for_company(company_name)
 
-    if tickers_df is None:
-        return jsonify({"error": "Ticker symbol mapping not available."}), 500
+    if ticker_symbol is None:
+        return jsonify({"error": f"Company '{company_name}' not found in ticker list."}), 404
 
-    match = tickers_df[tickers_df['Security Name'].str.contains(company_name, case=False)]
-
-    if match.empty:
-        return jsonify({"error": f"Company '{company_name}' not found."}), 404
-
-    ticker_symbol = match.iloc[0]['Symbol']
     print(f"Predicting for: {ticker_symbol}")
 
     try:
