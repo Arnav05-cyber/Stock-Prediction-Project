@@ -32,17 +32,15 @@ LOOK_BACK_PERIOD = 60
 app = Flask(__name__)
 CORS(app)
 
-# This is the new function to replace your existing one in app.py
+# The final debug version of the predict function for app.py
 @app.route('/predict', methods=['POST'], strict_slashes=False)
 def predict():
-    # 1. Get the company name from the request
     data = request.get_json()
     if not data or 'company_name' not in data:
         return jsonify({"error": "Missing 'company_name' in request body"}), 400
     
     company_name = data['company_name']
     
-    # 2. Find the ticker symbol for the company name
     if tickers_df is None:
         return jsonify({"error": "Ticker symbol mapping not available."}), 500
 
@@ -54,51 +52,27 @@ def predict():
     ticker_symbol = match.iloc[0]['Symbol']
     
     try:
-        # 3. Fetch live data
+        print(f"--- DEBUG: yfinance version is {yf.__version__} ---") # ADD THIS LINE
+        
         end_date = datetime.now()
         start_date = end_date - timedelta(days=LOOK_BACK_PERIOD + 30)
         
         live_data = yf.download(ticker_symbol, start=start_date, end=end_date)
-        
-        print("\n--- DEBUG: 1. Initial Data Downloaded (Last 5 rows) ---")
-        print(live_data.tail())
+        print(f"--- DEBUG: Raw data shape from yfinance on Railway: {live_data.shape} ---") # ADD THIS LINE
 
         live_data.dropna(inplace=True)
-        print("\n--- DEBUG: 2. Data After dropna() (Last 5 rows) ---")
-        print(live_data.tail())
+        print(f"--- DEBUG: Shape after dropna(): {live_data.shape} ---")
 
         if len(live_data) < LOOK_BACK_PERIOD:
              return jsonify({"error": f"Not enough historical data for {ticker_symbol} to make a prediction."}), 400
 
+        # ... (rest of the function is the same) ...
         recent_prices = live_data['Close'].values[-LOOK_BACK_PERIOD:].reshape(-1, 1)
-        print(f"\n--- DEBUG: 3. Recent {LOOK_BACK_PERIOD} Prices for Scaling (Shape: {recent_prices.shape}) ---")
-        # Check for NaNs manually before scaling
-        if np.isnan(recent_prices).any():
-            print("!!! CRITICAL ERROR: NaN detected in source prices BEFORE scaling !!!")
-            
-        # 4. Preprocess the live data
         scaled_live_data = scaler.transform(recent_prices)
-        print(f"\n--- DEBUG: 4. Scaled Data Sent to Model (Shape: {scaled_live_data.shape}) ---")
-        # Check for NaNs after scaling
-        if np.isnan(scaled_live_data).any():
-            print("!!! CRITICAL ERROR: NaN detected AFTER scaling !!!")
-        
-        # 5. Reshape the data
         X_live = np.reshape(scaled_live_data, (1, LOOK_BACK_PERIOD, 1))
-        
-        # 6. Make a prediction
         predicted_scaled_price = model.predict(X_live)
-        print(f"\n--- DEBUG: 5. Model Raw Prediction (Scaled) ---")
-        print(predicted_scaled_price)
-        if np.isnan(predicted_scaled_price).any():
-            print("!!! CRITICAL ERROR: NaN predicted by the model !!!")
-
-        # 7. Inverse transform 
         predicted_price = scaler.inverse_transform(predicted_scaled_price)
-        print(f"\n--- DEBUG: 6. Final Price (Inverse Transformed) ---")
-        print(predicted_price)
         
-        # 8. Return the result
         return jsonify({
             "company_name": company_name,
             "ticker_symbol": ticker_symbol,
@@ -106,7 +80,6 @@ def predict():
         })
 
     except Exception as e:
-        # Print the full error to the server console for debugging
         import traceback
         print(traceback.format_exc())
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
